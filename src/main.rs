@@ -24,40 +24,22 @@ fn main() {
 
 fn create_dns_response(request: &[u8]) -> Vec<u8> {
     let mut response = Vec::with_capacity(512);
-    // Extract values from request header
     let id = u16::from_be_bytes([request[0], request[1]]);
     let flags = u16::from_be_bytes([request[2], request[3]]);
     let qdcount = u16::from_be_bytes([request[4], request[5]]);
     let opcode = (flags >> 11) & 0xF;
     let rd = flags & 0x100;  // Extract RD flag (bit 8)
 
-    // Construct response header
-    let response_flags = if opcode == 0 {
-        0x8000 | (opcode << 11) | rd  // QR = 1, keep original OPCODE and RD
-    } else {
-        0x8000 | (opcode << 11) | rd | 0x4  // Not implemented
-    };
+    let response_flags = 0x8000 | (opcode << 11) | rd;  // QR = 1, keep original OPCODE and RD
 
-    response.extend_from_slice(&id.to_be_bytes());  // Use the same ID as the request
+    response.extend_from_slice(&id.to_be_bytes());
     response.extend_from_slice(&response_flags.to_be_bytes());
-    response.extend_from_slice(&qdcount.to_be_bytes());  // QDCOUNT: same as request
+    response.extend_from_slice(&qdcount.to_be_bytes());
     response.extend_from_slice(&qdcount.to_be_bytes());  // ANCOUNT: same as QDCOUNT
     response.extend_from_slice(&[0x00, 0x00]);  // NSCOUNT: 0
     response.extend_from_slice(&[0x00, 0x00]);  // ARCOUNT: 0
 
-    // Parse questions and construct response
-    let mut offset = 12;  // Start after header
-    let mut questions = Vec::new();
-
-    for _ in 0..qdcount {
-        if let Some((question, new_offset)) = parse_question(request, offset) {
-            questions.push(question);
-            offset = new_offset;
-        } else {
-            // If parsing fails, return an error response
-            return create_error_response(id, opcode, rd);
-        }
-    }
+    let (questions, _) = parse_questions(request, 12, qdcount as usize);
 
     // Add questions to response
     for question in &questions {
@@ -66,7 +48,7 @@ fn create_dns_response(request: &[u8]) -> Vec<u8> {
 
     // Add answers to response
     for question in &questions {
-        response.extend_from_slice(&question[..question.len() - 4]);  // Domain name
+        response.extend_from_slice(&[0xC0, 0x0C]);  // Pointer to the question name
         response.extend_from_slice(&[0x00, 0x01]);  // TYPE: A (1)
         response.extend_from_slice(&[0x00, 0x01]);  // CLASS: IN (1)
         response.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]);  // TTL: 60 seconds
@@ -77,68 +59,60 @@ fn create_dns_response(request: &[u8]) -> Vec<u8> {
     response
 }
 
-fn parse_question(packet: &[u8], mut offset: usize) -> Option<(Vec<u8>, usize)> {
-    let mut question = Vec::new();
-    let mut is_pointer = false;
-    let packet_len = packet.len();
+fn parse_questions(packet: &[u8], mut offset: usize, count: usize) -> (Vec<Vec<u8>>, usize) {
+    let mut questions = Vec::new();
+
+    for _ in 0..count {
+        let (question, new_offset) = parse_name(packet, offset);
+        offset = new_offset;
+
+        // Add QTYPE and QCLASS
+        let mut full_question = question;
+        full_question.extend_from_slice(&packet[offset..offset + 4]);
+        offset += 4;
+
+        questions.push(full_question);
+    }
+
+    (questions, offset)
+}
+
+fn parse_name(packet: &[u8], mut offset: usize) -> (Vec<u8>, usize) {
+    let mut name = Vec::new();
+    let mut jumped = false;
+    let mut max_jumps = 10;  // Prevent infinite loops
+    let mut jump_offset = offset;
 
     loop {
-        if offset >= packet_len {
-            return None;  // Out of bounds
-        }
+        if max_jumps == 0 { break; }
+        if offset >= packet.len() { break; }
 
-        let length = packet[offset] as usize;
-        if length == 0 {
-            if !is_pointer {
-                question.push(0);
+        let len = packet[offset] as usize;
+        if len & 0xC0 == 0xC0 {
+            if !jumped {
+                jump_offset = offset + 2;
             }
-            offset += 1;
-            break;
-        } else if length & 0xC0 == 0xC0 {
-            if offset + 1 >= packet_len {
-                return None;  // Out of bounds
-            }
-            if !is_pointer {
-                let pointer = u16::from_be_bytes([packet[offset] & 0x3F, packet[offset + 1]]);
-                if let Some((pointed_part, _)) = parse_question(packet, pointer as usize) {
-                    question.extend_from_slice(&pointed_part[..pointed_part.len() - 1]);  // Exclude null terminator
-                } else {
-                    return None;  // Invalid pointer
-                }
-                offset += 2;
-                is_pointer = true;
+            if offset + 1 < packet.len() {
+                offset = ((len & 0x3F) as usize) << 8 | packet[offset + 1] as usize;
+                jumped = true;
+                max_jumps -= 1;
+                continue;
             } else {
                 break;
             }
+        } else if len > 0 {
+            name.extend_from_slice(&packet[offset..offset + len + 1]);
+            offset += len + 1;
         } else {
-            if offset + length + 1 > packet_len {
-                return None;  // Out of bounds
-            }
-            question.extend_from_slice(&packet[offset..offset + length + 1]);
-            offset += length + 1;
+            name.push(0);
+            offset += 1;
+            break;
         }
     }
 
-    // Add QTYPE and QCLASS
-    if offset + 4 > packet_len {
-        return None;  // Out of bounds
+    if jumped {
+        (name, jump_offset)
+    } else {
+        (name, offset)
     }
-    question.extend_from_slice(&packet[offset..offset + 4]);
-    offset += 4;
-
-    Some((question, offset))
-}
-
-fn create_error_response(id: u16, opcode: u16, rd: u16) -> Vec<u8> {
-    let mut response = Vec::with_capacity(12);
-    let response_flags = 0x8000 | (opcode << 11) | rd | 0x2;  // QR = 1, RCODE = 2 (Server failure)
-
-    response.extend_from_slice(&id.to_be_bytes());
-    response.extend_from_slice(&response_flags.to_be_bytes());
-    response.extend_from_slice(&[0x00, 0x00]);  // QDCOUNT: 0
-    response.extend_from_slice(&[0x00, 0x00]);  // ANCOUNT: 0
-    response.extend_from_slice(&[0x00, 0x00]);  // NSCOUNT: 0
-    response.extend_from_slice(&[0x00, 0x00]);  // ARCOUNT: 0
-
-    response
 }
