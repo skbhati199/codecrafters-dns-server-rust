@@ -6,11 +6,13 @@ fn main() {
     
     loop {
         match udp_socket.recv_from(&mut buf) {
-            Ok((_, source)) => {
-                let response = create_dns_response();
-                udp_socket
-                    .send_to(&response, source)
-                    .expect("Failed to send response");
+            Ok((size, source)) => {
+                if size >= 12 {  // Ensure we have at least the header
+                    let response = create_dns_response(&buf[..size]);
+                    udp_socket
+                        .send_to(&response, source)
+                        .expect("Failed to send response");
+                }
             }
             Err(e) => {
                 eprintln!("Error receiving data: {}", e);
@@ -21,51 +23,52 @@ fn main() {
 }
 
 
-fn create_dns_response() -> Vec<u8> {
-    let mut response = Vec::new();
+fn create_dns_response(request: &[u8]) -> Vec<u8> {
+    let mut response = Vec::with_capacity(512);
 
-    // Header section (12 bytes)
-    response.extend_from_slice(&[
-        0x04, 0xD2, // ID: 1234
-        0x80, 0x00, // Flags: QR = 1, everything else = 0
-        0x00, 0x01, // QDCOUNT: 1
-        0x00, 0x01, // ANCOUNT: 1 (updated)
-        0x00, 0x00, // NSCOUNT: 0
-        0x00, 0x00, // ARCOUNT: 0
-    ]);
+    // Extract values from request
+    let id = u16::from_be_bytes([request[0], request[1]]);
+    let flags = u16::from_be_bytes([request[2], request[3]]);
+    let opcode = (flags >> 11) & 0xF;
+    let rd = flags & 0x1;
 
-    // Question section
-    // Name: codecrafters.io
-    response.extend_from_slice(&[
-        0x0c, b'c', b'o', b'd', b'e', b'c', b'r', b'a', b'f', b't', b'e', b'r', b's',
-        0x02, b'i', b'o',
-        0x00, // Null terminator
-    ]);
+    // Construct response header
+    let response_flags = if opcode == 0 {
+        0x8000 | (opcode << 11) | (rd & 0x1)
+    } else {
+        0x8000 | (opcode << 11) | (rd & 0x1) | 0x4  // Not implemented
+    };
 
-    // Type: A (1)
-    response.extend_from_slice(&[0x00, 0x01]);
+    response.extend_from_slice(&id.to_be_bytes());
+    response.extend_from_slice(&response_flags.to_be_bytes());
+    response.extend_from_slice(&[0x00, 0x01]);  // QDCOUNT: 1
+    response.extend_from_slice(&[0x00, 0x01]);  // ANCOUNT: 1
+    response.extend_from_slice(&[0x00, 0x00]);  // NSCOUNT: 0
+    response.extend_from_slice(&[0x00, 0x00]);  // ARCOUNT: 0
 
-    // Class: IN (1)
-    response.extend_from_slice(&[0x00, 0x01]);
+    // Question section (copy from request)
+    let question_start = 12;
+    let question_end = question_start + find_question_end(&request[question_start..]);
+    response.extend_from_slice(&request[question_start..question_end]);
 
-    // Answer section
-    // Name: pointer to the domain name in the question section
-    response.extend_from_slice(&[0xc0, 0x0c]); // Pointer to offset 12
-
-    // Type: A (1)
-    response.extend_from_slice(&[0x00, 0x01]);
-
-    // Class: IN (1)
-    response.extend_from_slice(&[0x00, 0x01]);
-
-    // TTL: 60 seconds
-    response.extend_from_slice(&[0x00, 0x00, 0x00, 0x3c]);
-
-    // RDLENGTH: 4 (length of IPv4 address)
-    response.extend_from_slice(&[0x00, 0x04]);
-
-    // RDATA: IP address (8.8.8.8 in this example)
-    response.extend_from_slice(&[0x08, 0x08, 0x08, 0x08]);
+    // Answer section (simplified, just to keep the packet valid)
+    response.extend_from_slice(&[0xC0, 0x0C]);  // Pointer to domain name
+    response.extend_from_slice(&[0x00, 0x01]);  // Type: A
+    response.extend_from_slice(&[0x00, 0x01]);  // Class: IN
+    response.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]);  // TTL: 60 seconds
+    response.extend_from_slice(&[0x00, 0x04]);  // RDLENGTH: 4 bytes
+    response.extend_from_slice(&[127, 0, 0, 1]);  // IP: 127.0.0.1
 
     response
+}
+
+fn find_question_end(question: &[u8]) -> usize {
+    let mut i = 0;
+    while i < question.len() {
+        if question[i] == 0 {
+            return i + 5;  // null byte + QTYPE (2 bytes) + QCLASS (2 bytes)
+        }
+        i += question[i] as usize + 1;
+    }
+    question.len()
 }
