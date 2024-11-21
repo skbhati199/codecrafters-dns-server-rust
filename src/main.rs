@@ -39,7 +39,7 @@ fn create_dns_response(request: &[u8]) -> Vec<u8> {
         0x8000 | (opcode << 11) | rd | 0x4  // Not implemented
     };
 
-    response.extend_from_slice(&id.to_be_bytes());
+    response.extend_from_slice(&id.to_be_bytes());  // Use the same ID as the request
     response.extend_from_slice(&response_flags.to_be_bytes());
     response.extend_from_slice(&qdcount.to_be_bytes());  // QDCOUNT: same as request
     response.extend_from_slice(&qdcount.to_be_bytes());  // ANCOUNT: same as QDCOUNT
