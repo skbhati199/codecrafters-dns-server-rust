@@ -30,33 +30,35 @@ fn create_dns_response(request: &[u8]) -> Vec<u8> {
     let opcode = (flags >> 11) & 0xF;
     let rd = flags & 0x100;  // Extract RD flag (bit 8)
 
-    let response_flags = 0x8000 | (opcode << 11) | rd;  // QR = 1, keep original OPCODE and RD
+    // Set QR to 1, keep original OPCODE and RD, set RA to 0, and set RCODE to 4 (Not Implemented)
+    let response_flags = 0x8000 | (opcode << 11) | rd | 0x0004;
 
     response.extend_from_slice(&id.to_be_bytes());
     response.extend_from_slice(&response_flags.to_be_bytes());
     response.extend_from_slice(&qdcount.to_be_bytes());
-    response.extend_from_slice(&qdcount.to_be_bytes());  // ANCOUNT: same as QDCOUNT
+    response.extend_from_slice(&[0x00, 0x00]);  // ANCOUNT: 0
     response.extend_from_slice(&[0x00, 0x00]);  // NSCOUNT: 0
     response.extend_from_slice(&[0x00, 0x00]);  // ARCOUNT: 0
 
-    let (questions, _) = parse_questions(request, 12, qdcount as usize);
-
-    // Add questions to response
-    for question in &questions {
-        response.extend_from_slice(question);
-    }
-
-    // Add answers to response
-    for question in &questions {
-        response.extend_from_slice(&[0xC0, 0x0C]);  // Pointer to the question name
-        response.extend_from_slice(&[0x00, 0x01]);  // TYPE: A (1)
-        response.extend_from_slice(&[0x00, 0x01]);  // CLASS: IN (1)
-        response.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]);  // TTL: 60 seconds
-        response.extend_from_slice(&[0x00, 0x04]);  // RDLENGTH: 4 bytes
-        response.extend_from_slice(&[8, 8, 8, 8]);  // RDATA: 8.8.8.8 (example IP)
-    }
+    // Copy the question section from the request
+    let question_start = 12;
+    let question_end = find_question_end(request, question_start);
+    response.extend_from_slice(&request[question_start..question_end]);
 
     response
+}
+
+fn find_question_end(packet: &[u8], mut offset: usize) -> usize {
+    while offset < packet.len() {
+        let len = packet[offset] as usize;
+        if len == 0 {
+            return offset + 5;  // 1 byte for null label + 2 bytes QTYPE + 2 bytes QCLASS
+        } else if len & 0xC0 == 0xC0 {
+            return offset + 6;  // 2 bytes for pointer + 2 bytes QTYPE + 2 bytes QCLASS
+        }
+        offset += len + 1;
+    }
+    packet.len()
 }
 
 fn parse_questions(packet: &[u8], mut offset: usize, count: usize) -> (Vec<Vec<u8>>, usize) {
