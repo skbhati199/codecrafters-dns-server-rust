@@ -30,13 +30,13 @@ fn create_dns_response(request: &[u8]) -> Vec<u8> {
     let id = u16::from_be_bytes([request[0], request[1]]);
     let flags = u16::from_be_bytes([request[2], request[3]]);
     let opcode = (flags >> 11) & 0xF;
-    let rd = flags & 0x1;
+    let rd = flags & 0x100;  // Extract RD flag (bit 8)
 
     // Construct response header
     let response_flags = if opcode == 0 {
-        0x8000 | (opcode << 11) | (rd & 0x1)
+        0x8000 | (opcode << 11) | rd  // QR = 1, keep original OPCODE and RD
     } else {
-        0x8000 | (opcode << 11) | (rd & 0x1) | 0x4  // Not implemented
+        0x8000 | (opcode << 11) | rd | 0x4  // Not implemented
     };
 
     response.extend_from_slice(&id.to_be_bytes());
