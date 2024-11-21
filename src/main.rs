@@ -1,4 +1,5 @@
 use std::net::UdpSocket;
+
 fn main() {
     let udp_socket = UdpSocket::bind("127.0.0.1:2053").expect("Failed to bind to address");
     let mut buf = [0; 512];
@@ -20,6 +21,7 @@ fn main() {
         }
     }
 }
+
 fn create_dns_response(request: &[u8]) -> Vec<u8> {
     let mut response = Vec::with_capacity(512);
     // Extract values from request header
@@ -28,30 +30,40 @@ fn create_dns_response(request: &[u8]) -> Vec<u8> {
     let qdcount = u16::from_be_bytes([request[4], request[5]]);
     let opcode = (flags >> 11) & 0xF;
     let rd = flags & 0x100;  // Extract RD flag (bit 8)
+
     // Construct response header
     let response_flags = if opcode == 0 {
         0x8000 | (opcode << 11) | rd  // QR = 1, keep original OPCODE and RD
     } else {
         0x8000 | (opcode << 11) | rd | 0x4  // Not implemented
     };
+
     response.extend_from_slice(&id.to_be_bytes());  // Use the same ID as the request
     response.extend_from_slice(&response_flags.to_be_bytes());
     response.extend_from_slice(&qdcount.to_be_bytes());  // QDCOUNT: same as request
     response.extend_from_slice(&qdcount.to_be_bytes());  // ANCOUNT: same as QDCOUNT
     response.extend_from_slice(&[0x00, 0x00]);  // NSCOUNT: 0
     response.extend_from_slice(&[0x00, 0x00]);  // ARCOUNT: 0
+
     // Parse questions and construct response
     let mut offset = 12;  // Start after header
     let mut questions = Vec::new();
+
     for _ in 0..qdcount {
-        let (question, new_offset) = parse_question(request, offset);
-        questions.push(question);
-        offset = new_offset;
+        if let Some((question, new_offset)) = parse_question(request, offset) {
+            questions.push(question);
+            offset = new_offset;
+        } else {
+            // If parsing fails, return an error response
+            return create_error_response(id, opcode, rd);
+        }
     }
+
     // Add questions to response
     for question in &questions {
         response.extend_from_slice(question);
     }
+
     // Add answers to response
     for question in &questions {
         response.extend_from_slice(&question[..question.len() - 4]);  // Domain name
@@ -61,12 +73,20 @@ fn create_dns_response(request: &[u8]) -> Vec<u8> {
         response.extend_from_slice(&[0x00, 0x04]);  // RDLENGTH: 4 bytes
         response.extend_from_slice(&[8, 8, 8, 8]);  // RDATA: 8.8.8.8 (example IP)
     }
+
     response
 }
-fn parse_question(packet: &[u8], mut offset: usize) -> (Vec<u8>, usize) {
+
+fn parse_question(packet: &[u8], mut offset: usize) -> Option<(Vec<u8>, usize)> {
     let mut question = Vec::new();
     let mut is_pointer = false;
+    let packet_len = packet.len();
+
     loop {
+        if offset >= packet_len {
+            return None;  // Out of bounds
+        }
+
         let length = packet[offset] as usize;
         if length == 0 {
             if !is_pointer {
@@ -75,22 +95,50 @@ fn parse_question(packet: &[u8], mut offset: usize) -> (Vec<u8>, usize) {
             offset += 1;
             break;
         } else if length & 0xC0 == 0xC0 {
+            if offset + 1 >= packet_len {
+                return None;  // Out of bounds
+            }
             if !is_pointer {
                 let pointer = u16::from_be_bytes([packet[offset] & 0x3F, packet[offset + 1]]);
-                let (pointed_part, _) = parse_question(packet, pointer as usize);
-                question.extend_from_slice(&pointed_part[..pointed_part.len() - 1]);  // Exclude null terminator
+                if let Some((pointed_part, _)) = parse_question(packet, pointer as usize) {
+                    question.extend_from_slice(&pointed_part[..pointed_part.len() - 1]);  // Exclude null terminator
+                } else {
+                    return None;  // Invalid pointer
+                }
                 offset += 2;
                 is_pointer = true;
             } else {
                 break;
             }
         } else {
+            if offset + length + 1 > packet_len {
+                return None;  // Out of bounds
+            }
             question.extend_from_slice(&packet[offset..offset + length + 1]);
             offset += length + 1;
         }
     }
+
     // Add QTYPE and QCLASS
+    if offset + 4 > packet_len {
+        return None;  // Out of bounds
+    }
     question.extend_from_slice(&packet[offset..offset + 4]);
     offset += 4;
-    (question, offset)
+
+    Some((question, offset))
+}
+
+fn create_error_response(id: u16, opcode: u16, rd: u16) -> Vec<u8> {
+    let mut response = Vec::with_capacity(12);
+    let response_flags = 0x8000 | (opcode << 11) | rd | 0x2;  // QR = 1, RCODE = 2 (Server failure)
+
+    response.extend_from_slice(&id.to_be_bytes());
+    response.extend_from_slice(&response_flags.to_be_bytes());
+    response.extend_from_slice(&[0x00, 0x00]);  // QDCOUNT: 0
+    response.extend_from_slice(&[0x00, 0x00]);  // ANCOUNT: 0
+    response.extend_from_slice(&[0x00, 0x00]);  // NSCOUNT: 0
+    response.extend_from_slice(&[0x00, 0x00]);  // ARCOUNT: 0
+
+    response
 }
