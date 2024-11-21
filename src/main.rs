@@ -7,7 +7,7 @@ fn main() {
     loop {
         match udp_socket.recv_from(&mut buf) {
             Ok((_, source)) => {
-                let response = create_dns_header();
+                let response = create_dns_response();
                 udp_socket
                     .send_to(&response, source)
                     .expect("Failed to send response");
@@ -19,35 +19,32 @@ fn main() {
         }
     }
 }
+fn create_dns_response() -> Vec<u8> {
+    let mut response = Vec::new();
 
-fn create_dns_header() -> [u8; 12] {
-    let mut header = [0u8; 12];
+    // Header section (12 bytes)
+    response.extend_from_slice(&[
+        0x04, 0xD2, // ID: 1234
+        0x80, 0x00, // Flags: QR = 1, everything else = 0
+        0x00, 0x01, // QDCOUNT: 1
+        0x00, 0x00, // ANCOUNT: 0
+        0x00, 0x00, // NSCOUNT: 0
+        0x00, 0x00, // ARCOUNT: 0
+    ]);
 
-    // Packet Identifier (ID): 16 bits (1234 in big-endian)
-    header[0] = 0x04;
-    header[1] = 0xD2;
+    // Question section
+    // Name: codecrafters.io
+    response.extend_from_slice(&[
+        0x0c, b'c', b'o', b'd', b'e', b'c', b'r', b'a', b'f', b't', b'e', b'r', b's',
+        0x02, b'i', b'o',
+        0x00, // Null terminator
+    ]);
 
-    // Flags: 16 bits
-    // QR (1 bit) | OPCODE (4 bits) | AA (1 bit) | TC (1 bit) | RD (1 bit) | RA (1 bit) | Z (3 bits) | RCODE (4 bits)
-    // 1000 0000 | 0000 0000
-    header[2] = 0x80;
-    header[3] = 0x00;
+    // Type: A (1)
+    response.extend_from_slice(&[0x00, 0x01]);
 
-    // Question Count (QDCOUNT): 16 bits (0)
-    header[4] = 0x00;
-    header[5] = 0x00;
+    // Class: IN (1)
+    response.extend_from_slice(&[0x00, 0x01]);
 
-    // Answer Record Count (ANCOUNT): 16 bits (0)
-    header[6] = 0x00;
-    header[7] = 0x00;
-
-    // Authority Record Count (NSCOUNT): 16 bits (0)
-    header[8] = 0x00;
-    header[9] = 0x00;
-
-    // Additional Record Count (ARCOUNT): 16 bits (0)
-    header[10] = 0x00;
-    header[11] = 0x00;
-
-    header
+    response
 }
