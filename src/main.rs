@@ -26,7 +26,7 @@ fn main() {
 fn create_dns_response(request: &[u8]) -> Vec<u8> {
     let mut response = Vec::with_capacity(512);
 
-    // Extract values from request
+    // Extract values from request header
     let id = u16::from_be_bytes([request[0], request[1]]);
     let flags = u16::from_be_bytes([request[2], request[3]]);
     let opcode = (flags >> 11) & 0xF;
@@ -46,29 +46,43 @@ fn create_dns_response(request: &[u8]) -> Vec<u8> {
     response.extend_from_slice(&[0x00, 0x00]);  // NSCOUNT: 0
     response.extend_from_slice(&[0x00, 0x00]);  // ARCOUNT: 0
 
-    // Question section (copy from request)
-    let question_start = 12;
-    let question_end = question_start + find_question_end(&request[question_start..]);
-    response.extend_from_slice(&request[question_start..question_end]);
+    // Parse and copy question section
+    let (question_section, domain_name) = parse_question_section(&request[12..]);
+    response.extend_from_slice(&question_section);
 
-    // Answer section (simplified, just to keep the packet valid)
-    response.extend_from_slice(&[0xC0, 0x0C]);  // Pointer to domain name
-    response.extend_from_slice(&[0x00, 0x01]);  // Type: A
-    response.extend_from_slice(&[0x00, 0x01]);  // Class: IN
+    // Construct answer section
+    response.extend_from_slice(&domain_name);  // NAME: pointer to the domain name
+    response.extend_from_slice(&[0x00, 0x01]);  // TYPE: A (1)
+    response.extend_from_slice(&[0x00, 0x01]);  // CLASS: IN (1)
     response.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]);  // TTL: 60 seconds
     response.extend_from_slice(&[0x00, 0x04]);  // RDLENGTH: 4 bytes
-    response.extend_from_slice(&[127, 0, 0, 1]);  // IP: 127.0.0.1
+    response.extend_from_slice(&[8, 8, 8, 8]);  // RDATA: 8.8.8.8
 
     response
 }
 
-fn find_question_end(question: &[u8]) -> usize {
+fn parse_question_section(question: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut parsed = Vec::new();
     let mut i = 0;
+    let mut label_positions = Vec::new();
+
     while i < question.len() {
-        if question[i] == 0 {
-            return i + 5;  // null byte + QTYPE (2 bytes) + QCLASS (2 bytes)
+        let label_length = question[i] as usize;
+        if label_length == 0 {
+            parsed.push(0);
+            i += 1;
+            break;
         }
-        i += question[i] as usize + 1;
+        label_positions.push(parsed.len() as u16);
+        parsed.extend_from_slice(&question[i..i + label_length + 1]);
+        i += label_length + 1;
     }
-    question.len()
+
+    // Add QTYPE and QCLASS
+    parsed.extend_from_slice(&question[i..i + 4]);
+
+    // Create domain name pointer
+    let domain_name = vec![0xC0, 0x0C];  // Pointer to offset 12
+
+    (parsed, domain_name)
 }
