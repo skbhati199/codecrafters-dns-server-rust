@@ -1,6 +1,7 @@
 use anyhow::Result;
 use dns_starter_rust::DnsMessage;
 use std::net::UdpSocket;
+
 fn main() -> Result<()> {
     println!("Logs from your program will appear here!");
     let udp_socket = UdpSocket::bind("127.0.0.1:2053").expect("Failed to bind to address");
